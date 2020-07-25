@@ -172,7 +172,11 @@ class TransformerModel(FairseqEncoderDecoderModel):
                             help='block size of quantization noise at training time')
         parser.add_argument('--quant-noise-scalar', type=float, metavar='D', default=0,
                             help='scalar quantization noise and scalar quantization at training time')
-        # fmt: on
+        # 
+        parser.add_argument('--gradient_checkpointing_encoder', action='store_true',
+                            help='add gradient checkpointing')
+        parser.add_argument('--gradient_checkpointing_decoder', action='store_true',
+                            help='add gradient checkpointing')
 
     @classmethod
     def build_model(cls, args, task):
@@ -336,6 +340,8 @@ class TransformerEncoder(FairseqEncoder):
         else:
             self.layernorm_embedding = None
 
+        self.gradient_checkpointing = getattr(args, "gradient_checkpointing_encoder", False)
+
         if not args.adaptive_input and args.quant_noise_pq > 0:
             self.quant_noise = apply_quant_noise_(
                 nn.Linear(embed_dim, embed_dim, bias=False),
@@ -408,7 +414,14 @@ class TransformerEncoder(FairseqEncoder):
 
         # encoder layers
         for layer in self.layers:
-            x = layer(x, encoder_padding_mask)
+            if self.gradient_checkpointing:
+                x = torch.utils.checkpoint.checkpoint(
+                    layer,
+                    x,
+                    encoder_padding_mask
+                )
+            else:
+                x = layer(x, encoder_padding_mask)
             if return_all_hiddens:
                 assert encoder_states is not None
                 encoder_states.append(x)
@@ -578,6 +591,8 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             self.layernorm_embedding = LayerNorm(embed_dim)
         else:
             self.layernorm_embedding = None
+
+        self.gradient_checkpointing = getattr(args, "gradient_checkpointing_decoder", False)
 
         self.cross_self_attention = getattr(args, "cross_self_attention", False)
 
@@ -776,16 +791,40 @@ class TransformerDecoder(FairseqIncrementalDecoder):
             else:
                 self_attn_mask = None
 
-            x, layer_attn, _ = layer(
-                x,
-                encoder_out.encoder_out if encoder_out is not None else None,
-                encoder_out.encoder_padding_mask if encoder_out is not None else None,
-                incremental_state,
-                self_attn_mask=self_attn_mask,
-                self_attn_padding_mask=self_attn_padding_mask,
-                need_attn=bool((idx == alignment_layer)),
-                need_head_weights=bool((idx == alignment_layer)),
-            )
+            if self.gradient_checkpointing and not bool((idx == alignment_layer)):
+                def create_custom_forward(module):
+                    def custom_forward(*inputs):
+                        inputs, self_attn_mask, self_attn_padding_mask = inputs[:-2], inputs[-2], inputs[-1]
+                        return module(
+                            *inputs,
+                            self_attn_padding_mask=self_attn_padding_mask,
+                            self_attn_mask=self_attn_mask,
+                            need_attn=False,
+                            need_head_weights=False,
+                            gradient_checkpointing=True,
+                        )
+                    return custom_forward
+                x = torch.utils.checkpoint.checkpoint(
+                    create_custom_forward(layer),
+                    x,
+                    encoder_out.encoder_out if encoder_out is not None else None,
+                    encoder_out.encoder_padding_mask if encoder_out is not None else None,
+                    incremental_state,
+                    self_attn_mask,
+                    self_attn_padding_mask
+                )
+                layer_attn = None
+            else:
+                x, layer_attn, _ = layer(
+                    x,
+                    encoder_out.encoder_out if encoder_out is not None else None,
+                    encoder_out.encoder_padding_mask if encoder_out is not None else None,
+                    incremental_state,
+                    self_attn_mask=self_attn_mask,
+                    self_attn_padding_mask=self_attn_padding_mask,
+                    need_attn=bool((idx == alignment_layer)),
+                    need_head_weights=bool((idx == alignment_layer)),
+                )
             inner_states.append(x)
             if layer_attn is not None and idx == alignment_layer:
                 attn = layer_attn.float().to(x)
