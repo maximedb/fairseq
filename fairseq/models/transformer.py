@@ -9,6 +9,7 @@ from typing import Any, Dict, List, Optional, Tuple
 import torch
 import torch.nn as nn
 from fairseq import options, utils
+from torch.utils import checkpoint
 from fairseq.models import (
     FairseqEncoder,
     FairseqEncoderDecoderModel,
@@ -415,7 +416,7 @@ class TransformerEncoder(FairseqEncoder):
         # encoder layers
         for layer in self.layers:
             if self.gradient_checkpointing:
-                x = torch.utils.checkpoint.checkpoint(
+                x = checkpoint.checkpoint(
                     layer,
                     x,
                     encoder_padding_mask
@@ -804,7 +805,7 @@ class TransformerDecoder(FairseqIncrementalDecoder):
                             gradient_checkpointing=True,
                         )
                     return custom_forward
-                x = torch.utils.checkpoint.checkpoint(
+                x = checkpoint.checkpoint(
                     create_custom_forward(layer),
                     x,
                     encoder_out.encoder_out if encoder_out is not None else None,
