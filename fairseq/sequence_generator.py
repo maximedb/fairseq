@@ -160,8 +160,9 @@ class SequenceGenerator(nn.Module):
 
     def _generate(
         self,
-        sample: Dict[str, Dict[str, Tensor]],
+        encoder_out: EncoderOut,
         prefix_tokens: Optional[Tensor] = None,
+        src_lengths: Optional[Tensor] = None,
         bos_token: Optional[int] = None,
     ):
         incremental_states = torch.jit.annotate(
@@ -171,46 +172,45 @@ class SequenceGenerator(nn.Module):
                 for i in range(self.model.models_size)
             ],
         )
-        net_input = sample["net_input"]
-        src_tokens = net_input["src_tokens"]
-        # length of the source text being the character length except EndOfSentence and pad
-        src_lengths = (
-            (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum(dim=1)
-        )
-        # bsz: total number of sentences in beam
-        input_size = src_tokens.size()
-        bsz, src_len = input_size[0], input_size[1]
+        # net_input = sample["net_input"]
+        # src_tokens = net_input["src_tokens"]
+        # # length of the source text being the character length except EndOfSentence and pad
+        # src_lengths = (
+        #     (src_tokens.ne(self.eos) & src_tokens.ne(self.pad)).long().sum(dim=1)
+        # )
+        # # bsz: total number of sentences in beam
+        # input_size = src_tokens.size()
+        src_len, bsz = encoder_out.encoder_out.size()[:2]
+        device = encoder_out.encoder_out.device
+        # bsz, src_len = input_size[0], input_size[1]
         beam_size = self.beam_size
 
         max_len: int = -1
-        if self.match_source_len:
-            max_len = src_lengths.max().item()
-        else:
-            max_len = min(
-                int(self.max_len_a * src_len + self.max_len_b),
-                # exclude the EOS marker
-                self.model.max_decoder_positions() - 1,
-            )
+        max_len = min(
+            int(self.max_len_a * src_len + self.max_len_b),
+            # exclude the EOS marker
+            self.model.max_decoder_positions() - 1,
+        )
         assert (
             self.min_len <= max_len
         ), "min_len cannot be larger than max_len, please adjust these!"
         # compute the encoder output for each beam
-        encoder_outs = self.model.forward_encoder(net_input)
-
+        # encoder_outs = self.model.forward_encoder(net_input)
+        encoder_outs = [encoder_out]
         # placeholder of indices for bsz * beam_size to hold tokens and accumulative scores
         new_order = torch.arange(bsz).view(-1, 1).repeat(1, beam_size).view(-1)
-        new_order = new_order.to(src_tokens.device).long()
+        new_order = new_order.to(device).long()
         encoder_outs = self.model.reorder_encoder_out(encoder_outs, new_order)
         # ensure encoder_outs is a List.
         assert encoder_outs is not None
 
         # initialize buffers
         scores = (
-            torch.zeros(bsz * beam_size, max_len + 1).to(src_tokens).float()
+            torch.zeros(bsz * beam_size, max_len + 1).to(device).float()
         )  # +1 for eos; pad is never choosed for scoring
         tokens = (
             torch.zeros(bsz * beam_size, max_len + 2)
-            .to(src_tokens)
+            .to(device)
             .long()
             .fill_(self.pad)
         )  # +2 for eos and pad
@@ -222,7 +222,7 @@ class SequenceGenerator(nn.Module):
         # samples. Then cands_to_ignore would mark 2 positions as being ignored,
         # so that we only finalize the remaining 3 samples.
         cands_to_ignore = (
-            torch.zeros(bsz, beam_size).to(src_tokens).eq(-1)
+            torch.zeros(bsz, beam_size).to(device).eq(-1)
         )  # forward and backward-compatible False mask
 
         # list of completed sentences
@@ -625,6 +625,7 @@ class SequenceGenerator(nn.Module):
 
     def _no_repeat_ngram(self, tokens, lprobs, bsz: int, beam_size: int, step: int):
         # for each beam and batch sentence, generate a list of previous ngrams
+        device = tokens.device
         gen_ngrams: List[Dict[str, List[int]]] = [
             torch.jit.annotate(Dict[str, List[int]], {})
             for bbsz_idx in range(bsz * beam_size)
@@ -655,7 +656,7 @@ class SequenceGenerator(nn.Module):
         for bbsz_idx in range(bsz * beam_size):
             lprobs[bbsz_idx][
                 torch.tensor(banned_tokens[bbsz_idx]).long()
-            ] = torch.tensor(-math.inf, dtype=torch.float)
+            ] = torch.tensor(-math.inf, dtype=torch.float, device=device)
         return lprobs
 
 

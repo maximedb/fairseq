@@ -11,7 +11,8 @@ import torch.nn.functional as F
 try:
     from apex.normalization import FusedLayerNorm as _FusedLayerNorm
 
-    has_fused_layernorm = True
+    # has_fused_layernorm = True
+    has_fused_layernorm = False
 
     class FusedLayerNorm(_FusedLayerNorm):
         @torch.jit.unused
